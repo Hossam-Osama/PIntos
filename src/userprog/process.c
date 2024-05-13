@@ -40,10 +40,22 @@ process_execute (const char *file_name)
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  
+ 
+
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+
+
+   // wait for the newly created thread to complete its initialization by calling sema_down
+  sema_down(&thread_current()->proper_order);
+
   return tid;
+
+
+  
 }
+
 
 /* A thread function that loads a user process and starts it
    running. */
@@ -61,10 +73,24 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
+  struct thread *child = thread_current();
+  struct thread *parent = child->parent;
+
+  if (success)
+  {
+   // parent->createdSucc = true;
+    list_push_back(&parent->child_list, &child->child_elem);
+    sema_up(&parent->proper_order);
+    sema_down(&child->proper_order);
+  }
+
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  if (!success) 
-    thread_exit ();
+  if (!success)
+  {
+    sema_up(&parent->proper_order);
+    exit(-1);
+  }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -85,11 +111,34 @@ start_process (void *file_name_)
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int
-process_wait (tid_t child_tid UNUSED) 
+
+int process_wait(tid_t child_tid)
 {
+  struct thread *currrent = thread_current();  
+  struct thread *child = NULL;          
+
+  for (struct list_elem *listElement = list_begin(&currrent->child_list); listElement != list_end(&currrent->child_list);listElement = list_next(listElement)){
+    struct thread *newprocess = list_entry(listElement, struct thread, child_elem);
+    if (newprocess->tid == child_tid)
+    {
+      child = newprocess;
+      break;
+    }
+  }
+  if (child != NULL)
+  {
+    list_remove(&child->child_elem);
+    // // Signal that the child process has exited by incrementing the sync semaphore
+    sema_up(&child->proper_order);
+    // Block the parent process until the child process completes by decrementing the waitChild semaphore
+    sema_down(&currrent->wait_Execution);
+    // Return the exit status of the child process
+    return currrent->childState;
+  }
+  // If no matching child process was found, return -1
   return -1;
 }
+
 
 /* Free the current process's resources. */
 void
@@ -97,6 +146,11 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+  // sema_up(&child->proper_order);   //signal that the child process has exited by incrementing the semaphore
+ // signal the parent process that the current process has exited by incrementing the waitChild semaphore
+  struct thread *parent = cur->parent;
+  if (parent != NULL)
+    sema_up(&parent->wait_Execution);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -437,7 +491,7 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        *esp = PHYS_BASE - 12;
       else
         palloc_free_page (kpage);
     }
